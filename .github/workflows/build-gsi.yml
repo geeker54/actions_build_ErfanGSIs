@@ -23,38 +23,43 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 安装基础依赖
+      - name: 安装系统依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-pip git wget unzip p7zip-full lzip liblzma-dev
+          sudo apt-get install -y python3-pip git wget unzip p7zip-full lzip liblzma-dev python3-dev build-essential
 
-      - name: 克隆 ErfanGSIs 并修复依赖
+      - name: 升级 pip 并安装 Python 依赖
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install wheel setuptools
+          python3 -m pip install pycryptodome  # 替代 pycrypto
+          # 如果后续脚本还需要其他包，可以提前安装
+          python3 -m pip install backports.lzma  # 需要 liblzma-dev 支持
+
+      - name: 克隆 ErfanGSIs 仓库
         run: |
           git clone --recurse-submodules https://github.com/erfanoabdi/ErfanGSIs.git
           cd ErfanGSIs
-          # 移除有问题的包
-          sed -i '/backports.lzma/d' requirements.txt
-          sed -i '/pycrypto/d' requirements.txt
-          # 安装替代包
-          python3 -m pip install --upgrade pip
-          python3 -m pip install pycryptodome
-          python3 -m pip install -r requirements.txt
-          # 运行原始 setup.sh（可能还会尝试安装 pip 包，但会因已安装而跳过）
+          # 如果 setup.sh 存在，直接运行（它可能会尝试安装 pip 包，但已安装的会跳过）
+          # 为了避免 setup.sh 中的 pip install 失败，我们注释掉其中的 pip 相关行（可选）
+          sed -i '/pip install/d' setup.sh 2>/dev/null || true
           bash setup.sh
 
       - name: 构建 GSI
         run: |
           cd ErfanGSIs
+          # 确保使用正确的参数格式
           sudo bash ./url2GSI.sh -c --${{ github.event.inputs.build_type }} "${{ github.event.inputs.rom_url }}" "${{ github.event.inputs.rom_name }}"
 
       - name: 验证输出
         run: |
           cd ErfanGSIs
-          ls -lh output/
+          echo "=== output 目录内容 ==="
+          ls -lh output/ || echo "output 目录不存在"
           if find output -name "*.img" -size +500M | grep -q .; then
             echo "✅ GSI 生成成功"
           else
-            echo "❌ 未找到有效的 GSI"
+            echo "❌ 未找到有效的 GSI 镜像"
             exit 1
           fi
 
@@ -63,3 +68,4 @@ jobs:
         with:
           name: ErfanGSI-output
           path: ErfanGSIs/output/
+          if-no-files-found: error
