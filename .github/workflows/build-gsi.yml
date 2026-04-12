@@ -23,42 +23,43 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 安装依赖
+      - name: 安装基础依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-pip git wget unzip p7zip-full lzip
-          python3 -m pip install --upgrade pip
+          sudo apt-get install -y python3-pip git wget unzip p7zip-full lzip liblzma-dev
 
-      - name: 克隆 ErfanGSIs 仓库
+      - name: 克隆 ErfanGSIs 并修复依赖
         run: |
           git clone --recurse-submodules https://github.com/erfanoabdi/ErfanGSIs.git
           cd ErfanGSIs
+          # 移除有问题的包
+          sed -i '/backports.lzma/d' requirements.txt
+          sed -i '/pycrypto/d' requirements.txt
+          # 安装替代包
+          python3 -m pip install --upgrade pip
+          python3 -m pip install pycryptodome
+          python3 -m pip install -r requirements.txt
+          # 运行原始 setup.sh（可能还会尝试安装 pip 包，但会因已安装而跳过）
           bash setup.sh
 
       - name: 构建 GSI
         run: |
           cd ErfanGSIs
-          # 注意参数格式：-c 表示清理旧输出，--aonly 或 --ab 指定分区类型
           sudo bash ./url2GSI.sh -c --${{ github.event.inputs.build_type }} "${{ github.event.inputs.rom_url }}" "${{ github.event.inputs.rom_name }}"
-          echo "构建脚本退出码: $?"
 
-      - name: 验证输出文件
+      - name: 验证输出
         run: |
           cd ErfanGSIs
-          echo "=== output 目录内容 ==="
-          ls -lh output/ || echo "output 目录不存在"
-          echo "=== 查找大文件 (>500M) ==="
-          find output -type f -size +500M -exec ls -lh {} \;
-          if find output -type f -name "*.img" -size +500M | grep -q .; then
+          ls -lh output/
+          if find output -name "*.img" -size +500M | grep -q .; then
             echo "✅ GSI 生成成功"
           else
-            echo "❌ 未找到有效的 GSI 镜像文件"
+            echo "❌ 未找到有效的 GSI"
             exit 1
           fi
 
-      - name: 上传 GSI 产物
+      - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
           name: ErfanGSI-output
           path: ErfanGSIs/output/
-          if-no-files-found: error
