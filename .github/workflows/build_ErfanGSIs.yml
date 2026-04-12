@@ -46,16 +46,13 @@ jobs:
 
        - name: Upgrade pip
          run: python3 -m pip install --upgrade pip
-
-       - name: Run setup.sh (with pip replaced)
-         run: |
-          sed -i 's/\bpip\b/python3 -m pip/g' setup.sh
-          ./setup.sh
           
        - name: Setting up ErfanGSI requirements
          run: |
               cd $GITHUB_WORKSPACE/ErfanGSIs
               mkdir ./output
+              sed -i 's/\bpip\b/python3 -m pip/g' setup.sh
+              ./setup.sh
               sudo bash ./setup.sh
        
        - name: Download Stock Rom & Generate GSI
