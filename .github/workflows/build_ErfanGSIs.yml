@@ -60,15 +60,6 @@ jobs:
            cd $GITHUB_WORKSPACE/ErfanGSIs
            sudo bash ./url2GSI.sh -c $BUILD_TYPE $ROM_URL $ROM_NAME
            echo "Build script finished with exit code $?"
-
-       - name: Verify GSI output
-         run: |
-           cd $GITHUB_WORKSPACE/ErfanGSIs
-           echo "=== Checking output directory ==="
-           ls -lh output/
-           echo "=== Checking final directory ==="
-           ls -lh output/final/ || echo "final/ directory not found
-           IMG_SIZE=$(find output -name "*.img" -type f -size +500M -exec du -sh {} \; | head -1)
           
 
        - name: Upload full output as artifact
