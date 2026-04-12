@@ -33,22 +33,22 @@ jobs:
           python3 -m pip install --upgrade pip
           python3 -m pip install wheel setuptools
           python3 -m pip install pycryptodome  # 替代 pycrypto
-          # 如果后续脚本还需要其他包，可以提前安装
-          python3 -m pip install backports.lzma  # 需要 liblzma-dev 支持
+          python3 -m pip install backports.lzma  # 需要 liblzma-dev
 
-      - name: 克隆 ErfanGSIs 仓库
+      - name: 克隆 ErfanGSIs 仓库并修复 setup.sh
         run: |
           git clone --recurse-submodules https://github.com/erfanoabdi/ErfanGSIs.git
           cd ErfanGSIs
-          # 如果 setup.sh 存在，直接运行（它可能会尝试安装 pip 包，但已安装的会跳过）
-          # 为了避免 setup.sh 中的 pip install 失败，我们注释掉其中的 pip 相关行（可选）
-          sed -i '/pip install/d' setup.sh 2>/dev/null || true
+          # 删除尝试安装 python-pip 的行（apt install python-pip）
+          sed -i '/apt-get install .*python-pip/d' setup.sh
+          # 删除任何 pip install 行（避免编译 pycrypto）
+          sed -i '/pip install/d' setup.sh
+          # 运行修改后的 setup.sh
           bash setup.sh
 
       - name: 构建 GSI
         run: |
           cd ErfanGSIs
-          # 确保使用正确的参数格式
           sudo bash ./url2GSI.sh -c --${{ github.event.inputs.build_type }} "${{ github.event.inputs.rom_url }}" "${{ github.event.inputs.rom_name }}"
 
       - name: 验证输出
