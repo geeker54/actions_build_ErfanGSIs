@@ -39,7 +39,19 @@ jobs:
          run: |
               sed -i 's/\|\| exit 1//g' $GITHUB_WORKSPACE/ErfanGSIs/url2GSI.sh
               sed -i 's/exit 1//g' $GITHUB_WORKSPACE/ErfanGSIs/url2GSI.sh
-       
+       - name: Install system dependencies
+         run: |
+            sudo apt-get update
+            sudo apt-get install -y python3 python3-pip build-essential
+
+       - name: Upgrade pip
+         run: python3 -m pip install --upgrade pip
+
+       - name: Run setup.sh (with pip replaced)
+         run: |
+          sed -i 's/\bpip\b/python3 -m pip/g' setup.sh
+          ./setup.sh
+          
        - name: Setting up ErfanGSI requirements
          run: |
               cd $GITHUB_WORKSPACE/ErfanGSIs
