@@ -24,26 +24,26 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: 安装系统依赖
+      - name: 安装系统依赖（不含 Python 包）
         run: |
           sudo apt update
-          sudo apt install -y git wget unzip xz-utils lzip python3.9 python3.9-dev python3.9-distutils
+          sudo apt install -y git wget unzip xz-utils lzip e2fsprogs android-sdk-libsparse-utils
 
-      - name: 设置 Python 3.9 为默认
-        run: |
-          sudo update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.9 1
-          sudo update-alternatives --set python3 /usr/bin/python3.9
-          python3 --version
+      - name: 设置 Python 3.9
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
 
-      - name: 安装 pip 并升级
+      - name: 升级 pip 和构建工具
         run: |
-          python3 -m ensurepip --upgrade
-          python3 -m pip install --upgrade pip setuptools wheel
+          python -m pip install --upgrade pip setuptools wheel
 
       - name: 克隆 ErfanGSIs 工具
         run: |
           git clone --recurse-submodules https://github.com/erfanoabdi/ErfanGSIs.git
           cd ErfanGSIs
+          # 跳过已知有问题的 pycrypto（ErfanGSIs 实际不需要它）
+          sed -i '/pycrypto/d' requirements.txt
           bash setup.sh
 
       - name: 下载 ROM 刷机包
