@@ -1,10 +1,10 @@
-name: Build GSI with ErfanGSIs
+name: Build GSI with ErfanGSIs (Auto Treble Fix)
 
 on:
   workflow_dispatch:
     inputs:
       rom_url:
-        description: 'ROM 刷机包直链 (.zip 格式)'
+        description: 'ROM 刷机包直链 (.zip / .tgz / .tar)'
         required: true
       rom_type:
         description: 'ROM 类型 (如 MIUI, ColorOS, OneUI)'
@@ -27,7 +27,9 @@ jobs:
       - name: 安装系统依赖
         run: |
           sudo apt update
-          sudo apt install -y git wget unzip xz-utils lzip e2fsprogs android-sdk-libsparse-utils liblzma-dev
+          sudo apt install -y git wget unzip xz-utils lzip e2fsprogs android-sdk-libsparse-utils liblzma-dev lz4
+          # 安装 sdat2img 工具（用于转换 system.new.dat）
+          git clone https://github.com/xpirt/sdat2img.git /tmp/sdat2img
 
       - name: 设置 Python 3.9
         uses: actions/setup-python@v5
@@ -47,6 +49,80 @@ jobs:
         run: |
           cd ErfanGSIs
           wget -O input.zip "${{ github.event.inputs.rom_url }}"
+
+      - name: 解压 ROM 并修复 Treble 支持
+        run: |
+          cd ErfanGSIs
+          mkdir -p rom_raw
+          unzip input.zip -d rom_raw/
+          
+          # 查找 system.img 或 system.new.dat
+          SYSTEM_IMG=$(find rom_raw -name "system.img" | head -n 1)
+          SYSTEM_DAT=$(find rom_raw -name "system.new.dat" | head -n 1)
+          
+          if [ -n "$SYSTEM_IMG" ]; then
+            echo "找到 system.img: $SYSTEM_IMG"
+            cp "$SYSTEM_IMG" system.img
+          elif [ -n "$SYSTEM_DAT" ]; then
+            echo "找到 system.new.dat，正在转换为 system.img..."
+            TRANSFER_LIST=$(find rom_raw -name "system.transfer.list" | head -n 1)
+            if [ -z "$TRANSFER_LIST" ]; then
+              echo "错误: 缺少 system.transfer.list，无法转换 .dat 文件"
+              exit 1
+            fi
+            python3 /tmp/sdat2img/sdat2img.py "$TRANSFER_LIST" "$SYSTEM_DAT" system.img
+          else
+            echo "错误: 未找到 system.img 或 system.new.dat"
+            exit 1
+          fi
+          
+          # 挂载 system.img 并检查/添加 Treble 属性
+          mkdir -p mnt_system
+          # 使用只读挂载先检查是否需要修改
+          sudo mount -o ro system.img mnt_system 2>/dev/null || {
+            # 如果只读失败，尝试修复文件系统
+            sudo e2fsck -fy system.img || true
+            sudo mount -o rw system.img mnt_system
+          }
+          
+          if [ -f mnt_system/system/build.prop ]; then
+            BUILD_PROP="mnt_system/system/build.prop"
+          elif [ -f mnt_system/build.prop ]; then
+            BUILD_PROP="mnt_system/build.prop"
+          else
+            echo "错误: 找不到 build.prop"
+            sudo umount mnt_system
+            exit 1
+          fi
+          
+          # 检查 Treble 支持
+          if ! grep -q "ro.treble.enabled" "$BUILD_PROP"; then
+            echo "ROM 不支持 Treble，正在自动添加属性..."
+            # 重新挂载为读写（如果当前是只读）
+            sudo mount -o remount,rw mnt_system
+            echo "ro.treble.enabled=true" | sudo tee -a "$BUILD_PROP"
+            echo "ro.product.first_api_level=28" | sudo tee -a "$BUILD_PROP"
+            echo "ro.product.vndk.version=28" | sudo tee -a "$BUILD_PROP"
+            echo "persist.sys.dalvik.vm.lib.2=libart.so" | sudo tee -a "$BUILD_PROP"
+          else
+            echo "ROM 已支持 Treble，无需修改"
+          fi
+          
+          # 卸载镜像
+          sudo umount mnt_system
+          
+          # 转换为 raw 格式（ErfanGSIs 需要）
+          sudo e2fsck -fy system.img || true
+          sudo resize2fs -M system.img
+          
+          # 重新打包为 zip 结构（替换原始 system 文件）
+          rm -rf rom_raw/system.img rom_raw/system.new.dat 2>/dev/null || true
+          cp system.img rom_raw/
+          cd rom_raw
+          zip -r ../input_fixed.zip .
+          cd ..
+          mv input_fixed.zip input.zip   # 替换原来的 zip
+          echo "Treble 修复完成，已重新打包为 input.zip"
 
       - name: 生成 GSI
         run: |
