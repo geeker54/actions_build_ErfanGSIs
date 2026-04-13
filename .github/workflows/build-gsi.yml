@@ -103,19 +103,26 @@ jobs:
             mv system.raw system.img
           fi
           
-          # 挂载并添加 Treble 属性
+          # 确保镜像可写：复制并修复文件系统
+          echo "准备可写镜像..."
+          cp system.img system.img.writable
+          sudo e2fsck -fy system.img.writable || true
+          sudo resize2fs -M system.img.writable
+          
           mkdir -p mnt_system
-          sudo mount -o ro system.img mnt_system 2>/dev/null || {
-            echo "挂载失败，尝试修复文件系统..."
-            sudo e2fsck -fy system.img || true
-            sudo mount -o ro system.img mnt_system
-          }
+          echo "以读写模式挂载镜像..."
+          sudo mount -o rw,loop system.img.writable mnt_system
+          if [ $? -ne 0 ]; then
+            echo "读写挂载失败，尝试强制重新挂载..."
+            sudo mount -o rw,loop,remount system.img.writable mnt_system
+          fi
           
           if [ $? -ne 0 ]; then
-            echo "错误: 无法挂载 system.img"
+            echo "错误: 无法以读写模式挂载 system.img"
             exit 1
           fi
           
+          # 查找 build.prop
           if [ -f mnt_system/system/build.prop ]; then
             BUILD_PROP="mnt_system/system/build.prop"
           elif [ -f mnt_system/build.prop ]; then
@@ -126,9 +133,9 @@ jobs:
             exit 1
           fi
           
-          if ! grep -q "ro.treble.enabled" "$BUILD_PROP"; then
+          # 检查 Treble 支持（使用 sudo grep）
+          if ! sudo grep -q "ro.treble.enabled" "$BUILD_PROP"; then
             echo "ROM 不支持 Treble，正在自动添加属性..."
-            sudo mount -o remount,rw mnt_system
             echo "ro.treble.enabled=true" | sudo tee -a "$BUILD_PROP"
             echo "ro.product.first_api_level=28" | sudo tee -a "$BUILD_PROP"
             echo "ro.product.vndk.version=28" | sudo tee -a "$BUILD_PROP"
@@ -139,7 +146,10 @@ jobs:
           
           sudo umount mnt_system
           
-          # 优化镜像大小
+          # 使用修改后的可写镜像替换原文件
+          mv system.img.writable system.img
+          
+          # 再次优化镜像大小
           sudo e2fsck -fy system.img || true
           sudo resize2fs -M system.img
           
