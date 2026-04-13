@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       rom_url:
-        description: 'ROM 刷机包直链 (.zip / .tgz / .tar)'
+        description: 'ROM 刷机包直链 (.zip / .tgz)'
         required: true
       rom_type:
         description: 'ROM 类型 (如 MIUI, ColorOS, OneUI)'
@@ -27,7 +27,7 @@ jobs:
       - name: 安装系统依赖
         run: |
           sudo apt update
-          sudo apt install -y git wget unzip xz-utils lzip e2fsprogs android-sdk-libsparse-utils liblzma-dev lz4
+          sudo apt install -y git wget unzip xz-utils lzip e2fsprogs android-sdk-libsparse-utils liblzma-dev lz4 tar gzip
           # 安装 sdat2img 工具（用于转换 system.new.dat）
           git clone https://github.com/xpirt/sdat2img.git /tmp/sdat2img
 
@@ -48,13 +48,33 @@ jobs:
       - name: 下载 ROM 刷机包
         run: |
           cd ErfanGSIs
-          wget -O input.zip "${{ github.event.inputs.rom_url }}"
+          wget -O input.pkg "${{ github.event.inputs.rom_url }}"
+          # 识别实际扩展名并重命名为标准名称
+          if file input.pkg | grep -q "gzip compressed"; then
+            mv input.pkg input.tgz
+          elif file input.pkg | grep -q "Zip archive"; then
+            mv input.pkg input.zip
+          else
+            echo "未知文件格式，尝试保留原扩展名"
+            mv input.pkg input.bin
+          fi
 
       - name: 解压 ROM 并修复 Treble 支持
         run: |
           cd ErfanGSIs
           mkdir -p rom_raw
-          unzip input.zip -d rom_raw/
+          
+          # 解压 .tgz 或 .zip
+          if [ -f input.tgz ]; then
+            echo "检测到 .tgz 文件，正在解压..."
+            tar -xzf input.tgz -C rom_raw/
+          elif [ -f input.zip ]; then
+            echo "检测到 .zip 文件，正在解压..."
+            unzip input.zip -d rom_raw/
+          else
+            echo "错误: 未找到可识别的压缩包"
+            exit 1
+          fi
           
           # 查找 system.img 或 system.new.dat
           SYSTEM_IMG=$(find rom_raw -name "system.img" | head -n 1)
