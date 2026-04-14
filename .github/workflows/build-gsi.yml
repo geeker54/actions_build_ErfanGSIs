@@ -1,4 +1,5 @@
-name: Build GSI with ErfanGSIs (Auto Treble Fix)
+
+name: Build GSI with ErfanGSIs (Treble check retained)
 
 on:
   workflow_dispatch:
@@ -27,7 +28,10 @@ jobs:
       - name: 安装系统依赖
         run: |
           sudo apt update
-          sudo apt install -y git wget unzip xz-utils lzip e2fsprogs android-sdk-libsparse-utils liblzma-dev lz4 tar gzip
+          sudo apt install -y git wget unzip xz-utils lzip e2fsprogs \
+            android-sdk-libsparse-utils liblzma-dev lz4 tar gcc make \
+            golang-go pigz brotli
+          # 安装 sdat2img 工具（用于处理 system.new.dat）
           git clone https://github.com/xpirt/sdat2img.git /tmp/sdat2img
 
       - name: 设置 Python 3.9
@@ -40,132 +44,47 @@ jobs:
           python -m pip install --upgrade pip
           pip install docopt protobuf pycryptodome backports.lzma
 
-      - name: 克隆 ErfanGSIs 工具
+      - name: 克隆 ErfanGSIs 并修复工具链
         run: |
-          git clone --recurse-submodules https://github.com/VegaBobo/ErfanGSIs.git
+          git clone --recurse-submodules https://github.com/erfanoabdi/ErfanGSIs.git
+          cd ErfanGSIs
+          
+          # 修复 Go 工具（解决 panic: runtime error）
+          cd tools/Firmware_extractor/zui/
+          go build packsparseimg.go
+          cd ../../../
+          # 确保可执行权限
+          chmod +x tools/Firmware_extractor/zui/packsparseimg
+          
+          # 修复其他可能缺少权限的脚本
+          chmod +x url2GSI.sh make.sh
 
       - name: 下载 ROM 刷机包
         run: |
           cd ErfanGSIs
           wget -O input.pkg "${{ github.event.inputs.rom_url }}"
+          # 识别文件类型并重命名
           if file input.pkg | grep -q "gzip compressed"; then
             mv input.pkg input.tgz
           elif file input.pkg | grep -q "Zip archive"; then
             mv input.pkg input.zip
           else
-            echo "未知文件格式，尝试保留原扩展名"
+            # 保留原样，ErfanGSIs 可能会处理
             mv input.pkg input.bin
           fi
+          ls -la
 
-      - name: 解压 ROM 并修复 Treble 支持
+      - name: 生成 GSI（保留 Treble 检查）
         run: |
           cd ErfanGSIs
-          mkdir -p rom_raw
-          
+          # 根据实际文件扩展名调用 url2GSI.sh
           if [ -f input.tgz ]; then
-            echo "检测到 .tgz 文件，正在解压..."
-            tar -xzf input.tgz -C rom_raw/
+            bash url2GSI.sh input.tgz "${{ github.event.inputs.rom_type }}" ${{ github.event.inputs.output_type }}
           elif [ -f input.zip ]; then
-            echo "检测到 .zip 文件，正在解压..."
-            unzip input.zip -d rom_raw/
+            bash url2GSI.sh input.zip "${{ github.event.inputs.rom_type }}" ${{ github.event.inputs.output_type }}
           else
-            echo "错误: 未找到可识别的压缩包"
-            exit 1
+            bash url2GSI.sh input.bin "${{ github.event.inputs.rom_type }}" ${{ github.event.inputs.output_type }}
           fi
-          
-          # 查找 system.img
-          SYSTEM_IMG=$(find rom_raw -name "system.img" | head -n 1)
-          if [ -n "$SYSTEM_IMG" ]; then
-            echo "找到 system.img: $SYSTEM_IMG"
-            cp "$SYSTEM_IMG" system.raw
-          else
-            SYSTEM_DAT=$(find rom_raw -name "system.new.dat" | head -n 1)
-            if [ -n "$SYSTEM_DAT" ]; then
-              echo "找到 system.new.dat，正在转换为 system.img..."
-              TRANSFER_LIST=$(find rom_raw -name "system.transfer.list" | head -n 1)
-              if [ -z "$TRANSFER_LIST" ]; then
-                echo "错误: 缺少 system.transfer.list，无法转换 .dat 文件"
-                exit 1
-              fi
-              python3 /tmp/sdat2img/sdat2img.py "$TRANSFER_LIST" "$SYSTEM_DAT" system.raw
-            else
-              echo "错误: 未找到 system.img 或 system.new.dat"
-              exit 1
-            fi
-          fi
-          
-          # 转换 sparse image 为 raw ext4
-          if file system.raw | grep -q "Android sparse image"; then
-            echo "检测到 sparse image，正在转换为 raw ext4..."
-            simg2img system.raw system.img
-          else
-            echo "已经是 raw ext4 格式，直接使用"
-            mv system.raw system.img
-          fi
-          
-          # 确保镜像可写：复制并修复文件系统
-          echo "准备可写镜像..."
-          cp system.img system.img.writable
-          sudo e2fsck -fy system.img.writable || true
-          sudo resize2fs -M system.img.writable
-          
-          mkdir -p mnt_system
-          echo "以读写模式挂载镜像..."
-          sudo mount -o rw,loop system.img.writable mnt_system
-          if [ $? -ne 0 ]; then
-            echo "读写挂载失败，尝试强制重新挂载..."
-            sudo mount -o rw,loop,remount system.img.writable mnt_system
-          fi
-          
-          if [ $? -ne 0 ]; then
-            echo "错误: 无法以读写模式挂载 system.img"
-            exit 1
-          fi
-          
-          # 查找 build.prop
-          if [ -f mnt_system/system/build.prop ]; then
-            BUILD_PROP="mnt_system/system/build.prop"
-          elif [ -f mnt_system/build.prop ]; then
-            BUILD_PROP="mnt_system/build.prop"
-          else
-            echo "错误: 找不到 build.prop"
-            sudo umount mnt_system
-            exit 1
-          fi
-          
-          # 检查 Treble 支持（使用 sudo grep）
-          if ! sudo grep -q "ro.treble.enabled" "$BUILD_PROP"; then
-            echo "ROM 不支持 Treble，正在自动添加属性..."
-            echo "ro.treble.enabled=true" | sudo tee -a "$BUILD_PROP"
-            echo "ro.product.first_api_level=28" | sudo tee -a "$BUILD_PROP"
-            echo "ro.product.vndk.version=28" | sudo tee -a "$BUILD_PROP"
-            echo "persist.sys.dalvik.vm.lib.2=libart.so" | sudo tee -a "$BUILD_PROP"
-          else
-            echo "ROM 已支持 Treble，无需修改"
-          fi
-          
-          sudo umount mnt_system
-          
-          # 使用修改后的可写镜像替换原文件
-          mv system.img.writable system.img
-          
-          # 再次优化镜像大小
-          sudo e2fsck -fy system.img || true
-          sudo resize2fs -M system.img
-          
-          # 重新打包为 zip
-          rm -rf rom_raw/system.img rom_raw/system.new.dat 2>/dev/null || true
-          cp system.img rom_raw/
-          cd rom_raw
-          zip -r ../input_fixed.zip .
-          cd ..
-          mv input_fixed.zip input.zip
-          echo "Treble 修复完成，已重新打包为 input.zip"
-
-      - name: 生成 GSI
-        run: |
-          cd ErfanGSIs
-          bash url2GSI.sh input.zip "${{ github.event.inputs.rom_type }}" ${{ github.event.inputs.output_type }}
 
       - name: 上传 GSI 镜像
         uses: actions/upload-artifact@v4
