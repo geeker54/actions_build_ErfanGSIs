@@ -1,0 +1,126 @@
+name: Build GSI with ErfanGSIs (Direct System.img + Bypass Treble Check)
+
+on:
+  workflow_dispatch:
+    inputs:
+      rom_url:
+        description: 'ROM 刷机包直链 (.zip / .tgz)'
+        required: true
+      rom_type:
+        description: 'ROM 类型 (如 MIUI, ColorOS, OneUI)'
+        required: true
+        default: 'Generic'
+      output_type:
+        description: '输出分区类型 (all / ab / a)'
+        required: true
+        default: 'ab'
+        type: choice
+        options:
+          - all
+          - ab
+          - a
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install system dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y git wget unzip xz-utils lzip e2fsprogs \
+            android-sdk-libsparse-utils liblzma-dev lz4 tar gcc make \
+            golang-go pigz brotli
+          git clone https://github.com/xpirt/sdat2img.git /tmp/sdat2img
+
+      - name: Setup Python 3.9
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install docopt protobuf pycryptodome backports.lzma
+
+      - name: Clone ErfanGSIs
+        run: |
+          git clone --recurse-submodules https://github.com/erfanoabdi/ErfanGSIs.git
+          cd ErfanGSIs
+          git submodule update --init --recursive
+          chmod +x url2GSI.sh make.sh 2>/dev/null || true
+
+      - name: Download and extract system.img
+        run: |
+          mkdir -p raw_rom
+          cd raw_rom
+          wget -O input.pkg "${{ github.event.inputs.rom_url }}"
+          
+          if file input.pkg | grep -q "gzip compressed"; then
+            mv input.pkg input.tgz
+            tar -xzf input.tgz
+          elif file input.pkg | grep -q "Zip archive"; then
+            mv input.pkg input.zip
+            unzip input.zip
+          else
+            echo "Unknown format"
+            exit 1
+          fi
+          
+          # Find system.img
+          SYSTEM_IMG=$(find . -name "system.img" | head -n 1)
+          if [ -z "$SYSTEM_IMG" ]; then
+            SYSTEM_DAT=$(find . -name "system.new.dat" | head -n 1)
+            if [ -n "$SYSTEM_DAT" ]; then
+              TRANSFER_LIST=$(find . -name "system.transfer.list" | head -n 1)
+              python3 /tmp/sdat2img/sdat2img.py "$TRANSFER_LIST" "$SYSTEM_DAT" system.img
+              SYSTEM_IMG="system.img"
+            else
+              echo "No system.img or system.new.dat found"
+              exit 1
+            fi
+          fi
+          
+          cp "$SYSTEM_IMG" system.raw
+          
+          # Convert sparse to raw
+          if file system.raw | grep -q "Android sparse image"; then
+            simg2img system.raw system.img.raw
+            mv system.img.raw system.raw
+          fi
+          
+          echo "SYSTEM_RAW=$(pwd)/system.raw" >> $GITHUB_ENV
+
+      - name: Create fake build.prop for ErfanGSIs Treble check
+        run: |
+          cd ErfanGSIs
+          mkdir -p tmp/system/system
+          cat > tmp/system/system/build.prop << 'EOF'
+          ro.build.version.release=14
+          ro.product.name=generic
+          ro.product.device=generic
+          ro.product.manufacturer=Google
+          ro.treble.enabled=true
+          ro.product.first_api_level=28
+          ro.product.vndk.version=28
+          persist.sys.dalvik.vm.lib.2=libart.so
+          EOF
+          echo "Fake build.prop created at tmp/system/system/build.prop"
+
+      - name: Run ErfanGSIs with pre-extracted system.img
+        run: |
+          cd ErfanGSIs
+          # Create a zip with just the system.img
+          mkdir -p input_pkg
+          cp ${{ env.SYSTEM_RAW }} input_pkg/system.img
+          cd input_pkg
+          zip -r ../input_ready.zip .
+          cd ..
+          
+          # Run url2GSI.sh
+          bash url2GSI.sh input_ready.zip "${{ github.event.inputs.rom_type }}" ${{ github.event.inputs.output_type }}
+
+      - name: Upload GSI image
+        uses: actions/upload-artifact@v4
+        with:
+          name: ErfanGSI-output
+          path: ErfanGSIs/output/*.img
