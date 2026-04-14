@@ -1,4 +1,4 @@
-name: Build GSI with ErfanGSIs (Treble check retained)
+name: Build GSI with ErfanGSIs (Pre-processed system.img)
 
 on:
   workflow_dispatch:
@@ -42,27 +42,24 @@ jobs:
           python -m pip install --upgrade pip
           pip install docopt protobuf pycryptodome backports.lzma
 
-      - name: 克隆 ErfanGSIs 并初始化所有子模块
+      - name: 克隆 ErfanGSIs 并初始化子模块
         run: |
           git clone --recurse-submodules https://github.com/erfanoabdi/ErfanGSIs.git
           cd ErfanGSIs
-          # 确保所有子模块都已拉取（包括 Firmware_extractor）
           git submodule update --init --recursive
-          # 修复 Go 工具（如果存在 packsparseimg.go）
+          # 尝试编译 Go 工具（如果存在）
           if [ -f "tools/Firmware_extractor/zui/packsparseimg.go" ]; then
             cd tools/Firmware_extractor/zui/
             go build packsparseimg.go
             chmod +x packsparseimg
             cd ../../../
-          else
-            echo "警告: tools/Firmware_extractor/zui/packsparseimg.go 不存在，跳过编译"
           fi
-          # 给关键脚本添加执行权限
           chmod +x url2GSI.sh make.sh 2>/dev/null || true
 
       - name: 下载 ROM 刷机包
         run: |
-          cd ErfanGSIs
+          mkdir -p raw_rom
+          cd raw_rom
           wget -O input.pkg "${{ github.event.inputs.rom_url }}"
           if file input.pkg | grep -q "gzip compressed"; then
             mv input.pkg input.tgz
@@ -71,18 +68,96 @@ jobs:
           else
             mv input.pkg input.bin
           fi
-          ls -la
 
-      - name: 生成 GSI（保留 Treble 检查）
+      - name: 解压 ROM，转换 system.img 并添加 Treble 属性
+        run: |
+          cd raw_rom
+          # 解压
+          if [ -f input.tgz ]; then
+            tar -xzf input.tgz
+          elif [ -f input.zip ]; then
+            unzip input.zip
+          else
+            echo "无法识别的压缩包格式"
+            exit 1
+          fi
+          
+          # 查找 system.img
+          SYSTEM_IMG=$(find . -name "system.img" | head -n 1)
+          if [ -z "$SYSTEM_IMG" ]; then
+            # 尝试查找 system.new.dat
+            SYSTEM_DAT=$(find . -name "system.new.dat" | head -n 1)
+            if [ -n "$SYSTEM_DAT" ]; then
+              TRANSFER_LIST=$(find . -name "system.transfer.list" | head -n 1)
+              if [ -z "$TRANSFER_LIST" ]; then
+                echo "找不到 system.transfer.list"
+                exit 1
+              fi
+              python3 /tmp/sdat2img/sdat2img.py "$TRANSFER_LIST" "$SYSTEM_DAT" system.img
+              SYSTEM_IMG="system.img"
+            else
+              echo "未找到 system.img 或 system.new.dat"
+              exit 1
+            fi
+          fi
+          
+          echo "原始 system.img 路径: $SYSTEM_IMG"
+          cp "$SYSTEM_IMG" system.raw
+          
+          # 转换 sparse 为 raw
+          if file system.raw | grep -q "Android sparse image"; then
+            echo "转换 sparse 镜像..."
+            simg2img system.raw system.img.raw
+            mv system.img.raw system.raw
+          fi
+          
+          # 修复文件系统并挂载
+          sudo e2fsck -fy system.raw || true
+          sudo resize2fs -M system.raw
+          mkdir -p mnt_system
+          sudo mount -o rw,loop system.raw mnt_system
+          
+          # 查找 build.prop
+          if [ -f mnt_system/system/build.prop ]; then
+            BUILD_PROP="mnt_system/system/build.prop"
+          elif [ -f mnt_system/build.prop ]; then
+            BUILD_PROP="mnt_system/build.prop"
+          else
+            echo "找不到 build.prop"
+            sudo umount mnt_system
+            exit 1
+          fi
+          
+          # 添加 Treble 属性（如果缺失）
+          if ! sudo grep -q "ro.treble.enabled" "$BUILD_PROP"; then
+            echo "添加 Treble 属性..."
+            echo "ro.treble.enabled=true" | sudo tee -a "$BUILD_PROP"
+            echo "ro.product.first_api_level=28" | sudo tee -a "$BUILD_PROP"
+            echo "ro.product.vndk.version=28" | sudo tee -a "$BUILD_PROP"
+            echo "persist.sys.dalvik.vm.lib.2=libart.so" | sudo tee -a "$BUILD_PROP"
+          fi
+          
+          sudo umount mnt_system
+          sudo e2fsck -fy system.raw || true
+          sudo resize2fs -M system.raw
+          
+          # 替换原包中的 system.img
+          if [ -f "$SYSTEM_IMG" ]; then
+            cp system.raw "$SYSTEM_IMG"
+          fi
+          
+          # 重新打包为 zip（ErfanGSIs 更容易处理 zip）
+          rm -f ../input_fixed.zip
+          zip -r ../input_fixed.zip .
+          cd ..
+          echo "重新打包完成: input_fixed.zip"
+
+      - name: 使用 ErfanGSIs 生成 GSI
         run: |
           cd ErfanGSIs
-          if [ -f input.tgz ]; then
-            bash url2GSI.sh input.tgz "${{ github.event.inputs.rom_type }}" ${{ github.event.inputs.output_type }}
-          elif [ -f input.zip ]; then
-            bash url2GSI.sh input.zip "${{ github.event.inputs.rom_type }}" ${{ github.event.inputs.output_type }}
-          else
-            bash url2GSI.sh input.bin "${{ github.event.inputs.rom_type }}" ${{ github.event.inputs.output_type }}
-          fi
+          # 将修复后的包复制到 ErfanGSIs 目录
+          cp ../input_fixed.zip input.zip
+          bash url2GSI.sh input.zip "${{ github.event.inputs.rom_type }}" ${{ github.event.inputs.output_type }}
 
       - name: 上传 GSI 镜像
         uses: actions/upload-artifact@v4
