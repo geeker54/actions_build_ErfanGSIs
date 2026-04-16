@@ -1,0 +1,143 @@
+name: Build GSI from Mounted & Modified system.img (All sudo)
+
+on:
+  workflow_dispatch:
+    inputs:
+      firmware_url:
+        description: '刷机包下载链接 (zip)'
+        required: true
+        type: string
+      firmware_type:
+        description: '固件类型 (MIUI, OxygenOS, ...)'
+        required: true
+        default: 'MIUI'
+      output_type:
+        description: '输出类型 (ab / aonly / both)'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - ab
+          - aonly
+          - both
+
+env:
+  TOOL_REPO: "https://github.com/erfanoabdi/ErfanGSIs.git"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git wget unzip xz-utils \
+            python3-pip brotli lzip android-sdk-libsparse-utils \
+            e2fsprogs p7zip-full liblzma-dev python3-dev
+          sudo pip3 install backports.lzma protobuf
+
+      - name: Download sdat2img
+        run: |
+          sudo wget https://raw.githubusercontent.com/xpirt/sdat2img/master/sdat2img.py
+          sudo chmod +x sdat2img.py
+
+      - name: Download firmware zip
+        run: |
+          sudo wget -O firmware.zip "${{ github.event.inputs.firmware_url }}"
+
+      - name: Extract firmware
+        run: |
+          sudo mkdir firmware_extracted
+          sudo unzip firmware.zip -d firmware_extracted
+          echo "=== Extracted files ==="
+          sudo ls -la firmware_extracted/
+          sudo find firmware_extracted -name "*.dat*" -o -name "*.list" | head -20
+
+      - name: Convert to system.img
+        run: |
+          cd firmware_extracted
+          
+          SYSTEM_DAT_BR=$(sudo find . -name "system.new.dat.br" | head -n 1)
+          if [ -z "$SYSTEM_DAT_BR" ]; then
+            echo "Error: system.new.dat.br not found!"
+            exit 1
+          fi
+          echo "Found system.new.dat.br at: $SYSTEM_DAT_BR"
+          
+          TRANSFER_LIST=$(sudo find . -name "system.transfer.list" | head -n 1)
+          if [ -z "$TRANSFER_LIST" ]; then
+            echo "Error: system.transfer.list not found!"
+            exit 1
+          fi
+          echo "Found system.transfer.list at: $TRANSFER_LIST"
+          
+          if [ "$SYSTEM_DAT_BR" != "./system.new.dat.br" ]; then
+            sudo cp "$SYSTEM_DAT_BR" ./system.new.dat.br
+          fi
+          
+          if [ "$TRANSFER_LIST" != "./system.transfer.list" ]; then
+            sudo cp "$TRANSFER_LIST" ./system.transfer.list
+          fi
+          
+          sudo brotli -d system.new.dat.br -o system.new.dat
+          sudo python3 ../sdat2img.py system.transfer.list system.new.dat system.img
+          
+          sudo mv system.img ../system_raw.img
+          cd ..
+          
+          echo "✅ system.img created at $(pwd)/system_raw.img"
+          sudo ls -lh system_raw.img
+
+      - name: Mount and modify system.img
+        run: |
+          sudo mkdir -p /mnt/system
+          sudo mount -o loop system_raw.img /mnt/system
+          
+          # 自定义修改（全部使用 sudo）
+          sudo touch /mnt/system/.modified_by_github_actions
+          
+          # 查看挂载内容
+          sudo ls -la /mnt/system/ | head -20
+          
+          sudo umount /mnt/system
+          echo "✅ Unmounted, modifications saved"
+
+      - name: Clone ErfanGSIs
+        run: |
+          sudo git clone --recurse-submodules ${{ env.TOOL_REPO }} ErfanGSIs
+          cd ErfanGSIs
+          sudo chmod +x *.sh
+          sudo bash setup.sh
+
+      - name: Build GSI from modified system.img
+        run: |
+          cd ErfanGSIs
+          OUTPUT_TYPE="${{ github.event.inputs.output_type }}"
+          
+          if [ "$OUTPUT_TYPE" == "both" ]; then
+            echo "Building A-Only image..."
+            sudo bash img2GSI.sh ../system_raw.img aonly
+            echo "Building A/B image..."
+            sudo bash img2GSI.sh ../system_raw.img ab
+          else
+            sudo bash img2GSI.sh ../system_raw.img "$OUTPUT_TYPE"
+          fi
+
+      - name: List output files
+        run: |
+          echo "=== Generated GSI files ==="
+          sudo ls -la ErfanGSIs/output/ || echo "No output yet"
+          sudo ls -la ~/output/ 2>/dev/null || echo "No ~/output"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: GSI-Builds
+          path: |
+            ErfanGSIs/output/*.img
+            system_raw.img
+          if-no-files-found: warn
+          retention-days: 7
