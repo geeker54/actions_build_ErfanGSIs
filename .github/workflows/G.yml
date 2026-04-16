@@ -57,7 +57,7 @@ jobs:
           ROM_URL="${{ github.event.inputs.ROM_URL }}"
           ROM_NAME="${{ github.event.inputs.ROM_NAME }}"
           OUTPUT_TYPE="${{ github.event.inputs.OUTPUT_TYPES }}"
-          bash url2GSI.sh "$ROM_URL" "$ROM_NAME" "$OUTPUT_TYPE" 2>&1 | tee build.log
+          ./url2GSI.sh "$ROM_URL" "$ROM_NAME" "$OUTPUT_TYPE" 2>&1 | tee build.log
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
