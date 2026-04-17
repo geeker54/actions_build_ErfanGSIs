@@ -41,7 +41,7 @@ jobs:
 
       - name: Clone ErfanGSIs
         run: |
-          git clone --recurse-submodules https://github.com/erfanoabdi/ErfanGSIs.git
+          git clone --recurse-submodules https://github.com/VegaBobo/ErfanGSIs.git
           cd ErfanGSIs && chmod +x *.sh
 
       - name: Setup environment (skip pycrypto error)
