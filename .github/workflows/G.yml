@@ -1,0 +1,79 @@
+name: Build GSI with ErfanGSIs
+
+on:
+  workflow_dispatch:
+    inputs:
+      ROM_URL:
+        description: '固件下载直链'
+        required: true
+        type: string
+      ROM_NAME:
+        description: '固件类型 (MIUI, ColorOS, OneUI, OxygenOS等)'
+        required: true
+        default: 'MIUI'
+        type: string
+      OUTPUT_TYPES:
+        description: '分区类型'
+        required: true
+        default: 'ab'
+        type: choice
+        options:
+          - ab
+          - aonly
+          - both
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git wget unzip xz-utils python3-pip brotli lzip e2fsprogs liblzma-dev python3-dev
+          sudo pip3 install protobuf backports.lzma
+
+      - name: Clone ErfanGSIs
+        run: |
+          git clone --recurse-submodules https://github.com/erfanoabdi/ErfanGSIs.git
+          cd ErfanGSIs && chmod +x *.sh
+
+      - name: Setup environment (skip pycrypto)
+        run: |
+          cd ErfanGSIs
+          sudo sed -i 's/^pip install pycrypto/# pip install pycrypto/g' setup.sh
+          sudo bash setup.sh || true
+          # 关键：将整个目录权限改为当前用户
+          sudo chown -R $(id -u):$(id -g) .
+
+      - name: Build GSI
+        run: |
+          cd ErfanGSIs
+          ROM_URL="${{ github.event.inputs.ROM_URL }}"
+          ROM_NAME="${{ github.event.inputs.ROM_NAME }}"
+          OUTPUT_TYPE="${{ github.event.inputs.OUTPUT_TYPES }}"
+          # 使用 sudo 运行，并保留环境变量
+          sudo -E bash url2GSI.sh "$ROM_URL" "$ROM_NAME" "$OUTPUT_TYPE" 2>&1 | tee build.log
+          # 修复输出文件权限
+          sudo chown -R $(id -u):$(id -g) output/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: GSI-Output
+          path: ErfanGSIs/output/*.img
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: ErfanGSIs/build.log
+          retention-days: 7
