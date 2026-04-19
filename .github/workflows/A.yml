@@ -1,0 +1,162 @@
+# .github/workflows/pack-system-img.yml
+name: 打包 Android system.img
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_mode:
+        description: '源文件来源'
+        required: true
+        type: choice
+        options:
+          - '仓库内文件夹'
+          - '下载外部压缩包'
+        default: '仓库内文件夹'
+      
+      source_folder:
+        description: '[模式1] 要打包的源文件夹路径 (相对于仓库根目录)'
+        required: false
+        default: 'system'
+      
+      download_url:
+        description: '[模式2] 下载源文件的 URL (支持 zip / tar.gz / tar.xz)'
+        required: false
+        default: ''
+      
+      image_size:
+        description: '镜像大小 (例如 2.5G 或 2600M)'
+        required: true
+        default: '2.5G'
+      
+      output_name:
+        description: '输出的镜像文件名'
+        required: true
+        default: 'system.img'
+      
+      compress_format:
+        description: '压缩格式'
+        required: true
+        type: choice
+        options:
+          - 'tar.gz'
+          - 'zip'
+        default: 'tar.gz'
+
+jobs:
+  build-img:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. 检出仓库（如果需要在仓库内存储配置文件或脚本）
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      # 2. 准备源文件夹
+      - name: 准备源文件夹
+        id: prepare_source
+        run: |
+          mkdir -p workspace
+          
+          if [ "${{ github.event.inputs.source_mode }}" == "下载外部压缩包" ]; then
+            echo ">>> 模式：从外部链接下载并解压"
+            DOWNLOAD_URL="${{ github.event.inputs.download_url }}"
+            if [ -z "$DOWNLOAD_URL" ]; then
+              echo "错误：下载 URL 不能为空！"
+              exit 1
+            fi
+            
+            echo "正在下载: $DOWNLOAD_URL"
+            wget -O workspace/archive "$DOWNLOAD_URL"
+            
+            echo "正在解压..."
+            cd workspace
+            if file archive | grep -q "Zip archive"; then
+              unzip -q archive -d extracted/
+            elif file archive | grep -q "gzip compressed"; then
+              tar -xzf archive -C extracted/ || (mkdir -p extracted && tar -xzf archive -C extracted/)
+            elif file archive | grep -q "XZ compressed"; then
+              tar -xJf archive -C extracted/ || (mkdir -p extracted && tar -xJf archive -C extracted/)
+            else
+              echo "错误：不支持的压缩格式"
+              exit 1
+            fi
+            
+            # 检测解压后的根文件夹
+            EXTRACTED_DIR="extracted"
+            COUNT=$(ls -1 "$EXTRACTED_DIR" | wc -l)
+            if [ $COUNT -eq 1 ] && [ -d "$EXTRACTED_DIR/$(ls -1 $EXTRACTED_DIR)" ]; then
+              SINGLE_DIR="$EXTRACTED_DIR/$(ls -1 $EXTRACTED_DIR)"
+              echo "检测到单层目录，自动进入: $SINGLE_DIR"
+              SOURCE_PATH="$SINGLE_DIR"
+            else
+              SOURCE_PATH="$EXTRACTED_DIR"
+            fi
+            cd ..
+            
+            echo "source_path=$SOURCE_PATH" >> $GITHUB_OUTPUT
+            echo "源文件夹路径: workspace/$SOURCE_PATH"
+            du -sh "workspace/$SOURCE_PATH"
+            
+          else
+            echo ">>> 模式：使用仓库内文件夹"
+            SOURCE_FOLDER="${{ github.event.inputs.source_folder }}"
+            if [ ! -d "$SOURCE_FOLDER" ]; then
+              echo "错误：源文件夹 '$SOURCE_FOLDER' 不存在！"
+              exit 1
+            fi
+            echo "source_path=$SOURCE_FOLDER" >> $GITHUB_OUTPUT
+            echo "源文件夹路径: $SOURCE_FOLDER"
+            du -sh "$SOURCE_FOLDER"
+          fi
+
+      # 3. 安装 make_ext4fs 工具
+      - name: 安装 make_ext4fs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y android-tools-fsutils
+          which make_ext4fs
+          make_ext4fs -h || true
+
+      # 4. 执行打包命令
+      - name: 打包 system.img
+        run: |
+          SOURCE_PATH="${{ steps.prepare_source.outputs.source_path }}"
+          echo "使用源路径: $SOURCE_PATH"
+          
+          make_ext4fs \
+            -l ${{ github.event.inputs.image_size }} \
+            -s \
+            -a system \
+            ${{ github.event.inputs.output_name }} \
+            "$SOURCE_PATH"
+          
+          echo "打包完成，生成文件:"
+          ls -lh ${{ github.event.inputs.output_name }}
+
+      # 5. 压缩生成的镜像文件
+      - name: 压缩 system.img
+        id: compress
+        run: |
+          IMAGE_NAME="${{ github.event.inputs.output_name }}"
+          COMPRESS_FORMAT="${{ github.event.inputs.compress_format }}"
+          
+          if [ "$COMPRESS_FORMAT" == "zip" ]; then
+            sudo apt-get install -y zip
+            zip -9 "${IMAGE_NAME}.zip" "${IMAGE_NAME}"
+            COMPRESSED_FILE="${IMAGE_NAME}.zip"
+          else
+            # tar.gz 默认
+            tar -czf "${IMAGE_NAME}.tar.gz" "${IMAGE_NAME}"
+            COMPRESSED_FILE="${IMAGE_NAME}.tar.gz"
+          fi
+          
+          echo "压缩完成: $COMPRESSED_FILE"
+          ls -lh "$COMPRESSED_FILE"
+          echo "compressed_file=$COMPRESSED_FILE" >> $GITHUB_OUTPUT
+
+      # 6. 上传压缩包为工作流产物
+      - name: 上传压缩包
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.compress.outputs.compressed_file }}
+          path: ${{ steps.compress.outputs.compressed_file }}
+          retention-days: 7
