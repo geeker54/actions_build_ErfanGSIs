@@ -1,0 +1,203 @@
+name: Build GSI from ROM Package
+
+on:
+  workflow_dispatch:
+    inputs:
+      rom_url:
+        description: 'ROM 刷机包直链下载地址'
+        required: true
+        type: string
+      rom_type:
+        description: 'ROM 类型'
+        required: true
+        type: choice
+        options:
+          - Stock
+          - MIUI
+          - ColorOS
+          - OneUI
+          - Flyme
+          - Generic
+        default: 'Generic'
+      output_type:
+        description: '输出分区类型'
+        required: true
+        type: choice
+        options:
+          - all        # Aonly + AB
+          - ab         # 仅 AB
+          - a          # 仅 Aonly
+        default: 'ab'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 安装构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            android-sdk-libsparse-utils \
+            e2fsprogs \
+            xz-utils \
+            unzip \
+            wget \
+            brotli \
+            python3 \
+            python-is-python3 \
+            python3-protobuf
+
+      - name: 克隆 ErfanGSIs 并准备外部工具
+        run: |
+          git clone --depth=1 https://github.com/erfanoabdi/ErfanGSIs.git
+          chmod -R 755 ErfanGSIs
+
+          # 创建 tools 目录并下载缺失的脚本/工具
+          mkdir -p ErfanGSIs/tools
+
+          # 下载 sdat2img.py（用于处理 system.new.dat.br + transfer.list）
+          wget -O ErfanGSIs/tools/sdat2img.py https://raw.githubusercontent.com/xpirt/sdat2img/master/sdat2img.py
+          chmod +x ErfanGSIs/tools/sdat2img.py
+
+          # 下载 payload_dumper 工具（用于从 payload.bin 提取分区）
+          git clone --depth=1 https://github.com/ssut/payload-dumper-go.git
+          cd payload-dumper-go
+          go build -o ../ErfanGSIs/tools/payload_dumper
+          cd ..
+          rm -rf payload-dumper-go
+
+      - name: 下载 ROM 包并提取 system.img
+        run: |
+          cd ErfanGSIs
+          mkdir -p rom_tmp output
+          wget -O rom.zip "${{ github.event.inputs.rom_url }}"
+
+          # 解压 ZIP/TAR
+          if unzip -q rom.zip -d rom_tmp; then
+            echo "ZIP 解压成功"
+          elif tar -xf rom.zip -C rom_tmp; then
+            echo "TAR 解压成功"
+          else
+            echo "无法解压 ROM 包"
+            exit 1
+          fi
+
+          cd rom_tmp
+
+          # 提取 system.img（支持多种格式）
+          if find . -name "system.img" -type f | grep -q .; then
+            cp $(find . -name "system.img" -type f | head -1) ../system.img
+            echo "直接找到 system.img"
+          elif [ -f system.new.dat.br ] && [ -f system.transfer.list ]; then
+            brotli -d system.new.dat.br -o system.new.dat
+            python3 ../tools/sdat2img.py system.transfer.list system.new.dat system.img
+            mv system.img ../
+            echo "从 system.new.dat.br 转换成功"
+          elif [ -f payload.bin ]; then
+            # 使用 Go 编译的 payload_dumper，速度快且无需 Python 依赖
+            ../tools/payload_dumper -o . payload.bin
+            if [ -f output/system.img ]; then
+              mv output/system.img ../
+              echo "从 payload.bin 提取成功"
+            else
+              echo "payload.bin 中未找到 system.img"
+              exit 1
+            fi
+          else
+            echo "未找到可用的 system 镜像"
+            exit 1
+          fi
+
+          cd ..
+          rm -rf rom_tmp
+          [ -f system.img ] || { echo "提取失败"; exit 1; }
+          echo "system.img 已就绪"
+
+      - name: 确保 system.img 为 EXT4 格式
+        run: |
+          cd ErfanGSIs
+          echo "检测 system.img 格式..."
+          IMG_INFO=$(file system.img)
+          echo "原始: $IMG_INFO"
+
+          # Android sparse → raw
+          if echo "$IMG_INFO" | grep -qi "Android sparse image"; then
+            echo "转换为 raw ext4..."
+            simg2img system.img system_raw.img
+            mv system_raw.img system.img
+          fi
+
+          # 若仍非 ext4，则挂载并重建
+          IMG_INFO=$(file system.img)
+          if ! echo "$IMG_INFO" | grep -qi "ext4"; then
+            echo "重建为 ext4..."
+            mkdir -p old_system new_system
+            sudo mount -t auto -o loop system.img old_system || { echo "挂载失败"; exit 1; }
+            SIZE=$(sudo du -sb old_system | awk '{print $1}')
+            NEW_SIZE=$(( SIZE * 12 / 10 ))
+            NEW_SIZE=$(( (NEW_SIZE + 1048575) / 1048576 ))M
+            truncate -s ${NEW_SIZE} system_new.img
+            mkfs.ext4 system_new.img
+            sudo mount -t ext4 -o loop system_new.img new_system
+            sudo cp -av old_system/* new_system/
+            sudo umount old_system new_system
+            mv system_new.img system.img
+          fi
+
+          echo "最终格式:"
+          file system.img
+          # 备份用于 all 模式
+          cp system.img system.img.backup
+
+      - name: 使用 ErfanGSIs 制作 GSI
+        run: |
+          cd ErfanGSIs
+          bash setup.sh
+
+          # ROM 类型 → 菜单数字（请根据实际 make.sh 调整）
+          case "${{ github.event.inputs.rom_type }}" in
+            Stock)   ROM_NUM=1 ;;
+            MIUI)    ROM_NUM=2 ;;
+            ColorOS) ROM_NUM=3 ;;
+            OneUI)   ROM_NUM=4 ;;
+            Flyme)   ROM_NUM=5 ;;
+            Generic) ROM_NUM=6 ;;
+            *)       ROM_NUM=6 ;;
+          esac
+
+          build_one() {
+            local GSI_NUM=$1
+            local TAG=$2
+            echo ">>> 构建 $TAG (GSI=$GSI_NUM, ROM=$ROM_NUM)"
+            printf "%d\n%d\n" "$GSI_NUM" "$ROM_NUM" | sudo bash make.sh
+            if ls output/*.img 1>/dev/null 2>&1; then
+              mkdir -p output/$TAG
+              mv output/*.img output/$TAG/
+            else
+              echo "警告：未生成 img 文件"
+            fi
+          }
+
+          case "${{ github.event.inputs.output_type }}" in
+            all)
+              build_one 1 "Aonly"
+              cp -f system.img.backup system.img
+              build_one 3 "AB"
+              ;;
+            a)
+              build_one 1 "Aonly"
+              ;;
+            ab)
+              build_one 3 "AB"
+              ;;
+          esac
+
+      - name: 上传生成的 GSI
+        uses: actions/upload-artifact@v4
+        with:
+          name: ErfanGSI-Output
+          path: ErfanGSIs/output/**/*.img
+          retention-days: 7
