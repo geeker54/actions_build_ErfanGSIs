@@ -1,0 +1,173 @@
+name: Build GSI from ROM (Manual Steps)
+
+on:
+  workflow_dispatch:
+    inputs:
+      rom_url:
+        description: 'ROM 刷机包直链 (.zip / .tgz)'
+        required: true
+        type: string
+      rom_type:
+        description: 'ROM 类型 (MIUI, ColorOS, OneUI...)'
+        required: true
+        type: choice
+        options:
+          - Stock
+          - MIUI
+          - ColorOS
+          - OneUI
+          - Flyme
+          - Generic
+        default: 'Generic'
+      output_type:
+        description: '输出分区类型 (all / ab / a)'
+        required: true
+        default: 'ab'
+        type: choice
+        options:
+          - all
+          - ab
+          - a
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            android-tools-fsutils \
+            e2fsprogs \
+            xz-utils \
+            unzip \
+            wget \
+            brotli \
+            python3 \
+            python-is-python3 \
+            python3-protobuf
+
+      - name: 克隆 ErfanGSIs
+        run: |
+          git clone --depth=1 https://github.com/erfanoabdi/ErfanGSIs.git
+          chmod -R 755 ErfanGSIs
+
+      - name: 下载并备份 ROM
+        run: |
+          cd ErfanGSIs
+          wget -O rom_original.zip "${{ github.event.inputs.rom_url }}"
+          # 留一个备份，后面 all 模式会重新提取
+          cp rom_original.zip rom_backup.zip
+
+      - name: 从 ROM 包提取 system.img
+        run: |
+          cd ErfanGSIs
+          mkdir -p rom_tmp output
+          unzip -q rom_original.zip -d rom_tmp || tar -xf rom_original.zip -C rom_tmp
+
+          cd rom_tmp
+          # 查找 system.img
+          if find . -name "system.img" -type f | grep -q .; then
+            cp $(find . -name "system.img" -type f | head -1) ../system.img
+          elif [ -f system.new.dat.br ] && [ -f system.transfer.list ]; then
+            brotli -d system.new.dat.br -o system.new.dat
+            python3 ../tools/sdat2img.py system.transfer.list system.new.dat system.img
+            mv system.img ../
+          elif [ -f payload.bin ]; then
+            python3 ../tools/payload_dumper/payload_dumper.py payload.bin
+            [ -f output/system.img ] && mv output/system.img ../ || { echo "提取失败"; exit 1; }
+          else
+            echo "未找到 system.img"; exit 1
+          fi
+
+          cd ..
+          rm -rf rom_tmp
+
+      - name: 处理 system.img 为 EXT4 格式
+        run: |
+          cd ErfanGSIs
+          IMG_INFO=$(file system.img)
+          echo "原始格式: $IMG_INFO"
+
+          # sparse → raw
+          if echo "$IMG_INFO" | grep -qi "Android sparse image"; then
+            simg2img system.img system_raw.img
+            mv system_raw.img system.img
+          fi
+
+          # 非 ext4 则挂载重建
+          IMG_INFO=$(file system.img)
+          if ! echo "$IMG_INFO" | grep -qi "ext4"; then
+            mkdir -p old_system new_system
+            sudo mount -t auto -o loop system.img old_system
+            SIZE=$(sudo du -sb old_system | awk '{print $1}')
+            NEW_SIZE=$(( SIZE * 12 / 10 ))
+            NEW_SIZE=$(( (NEW_SIZE + 1048575) / 1048576 ))M
+            truncate -s ${NEW_SIZE} system_new.img
+            mkfs.ext4 system_new.img
+            sudo mount -t ext4 -o loop system_new.img new_system
+            sudo cp -av old_system/* new_system/
+            sudo umount old_system new_system
+            mv system_new.img system.img
+          fi
+
+          echo "处理后的格式:"
+          file system.img
+
+          # 为 all 模式保留一份副本
+          cp system.img system.img.backup
+
+      - name: 制作 GSI（使用 ErfanGSIs）
+        run: |
+          cd ErfanGSIs
+          bash setup.sh
+
+          # ROM 类型 → 菜单数字（请核对你的版本，一般为：1=Stock,2=MIUI,3=ColorOS,4=OneUI,5=Flyme,6=Generic）
+          case "${{ github.event.inputs.rom_type }}" in
+            Stock)   ROM_NUM=1 ;;
+            MIUI)    ROM_NUM=2 ;;
+            ColorOS) ROM_NUM=3 ;;
+            OneUI)   ROM_NUM=4 ;;
+            Flyme)   ROM_NUM=5 ;;
+            Generic) ROM_NUM=6 ;;
+            *)       ROM_NUM=6 ;;
+          esac
+
+          build_one() {
+            local GSI_TYPE_NUM=$1   # 1=Aonly, 3=AB
+            local TAG=$2
+            echo ">>> 开始构建 $TAG (GSI=$GSI_TYPE_NUM, ROM=$ROM_NUM)"
+            # 用管道输入代替 expect，简洁且避免语法错
+            printf "%d\n%d\n" "$GSI_TYPE_NUM" "$ROM_NUM" | sudo bash make.sh
+            # 移动产物到子目录
+            if ls output/*.img 1>/dev/null 2>&1; then
+              mkdir -p output/$TAG
+              mv output/*.img output/$TAG/
+            fi
+          }
+
+          # 根据输出类型调用
+          case "${{ github.event.inputs.output_type }}" in
+            all)
+              build_one 1 "Aonly"
+              # 恢复 system.img
+              cp -f system.img.backup system.img
+              build_one 3 "AB"
+              ;;
+            a)
+              build_one 1 "Aonly"
+              ;;
+            ab)
+              build_one 3 "AB"
+              ;;
+          esac
+
+      - name: 上传 GSI 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ErfanGSI-Output
+          path: ErfanGSIs/output/**/*.img
+          retention-days: 7
