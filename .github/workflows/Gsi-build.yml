@@ -1,4 +1,4 @@
-name: Build GSI from ROM Package
+name: Build GS from ROM Package
 
 on:
   workflow_dispatch:
