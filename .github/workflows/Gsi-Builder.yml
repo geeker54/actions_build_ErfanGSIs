@@ -1,0 +1,117 @@
+name: Build GSI with ErfanGSIs (Stable)
+
+on:
+  workflow_dispatch:
+    inputs:
+      rom_url:
+        description: 'ROM 刷机包直链 (.zip)'
+        required: true
+        type: string
+      rom_name:
+        description: 'ROM 名称 (对应 ErfanGSI 支持的名称)'
+        required: true
+        type: choice
+        options:
+          - Generic
+          - MIUI
+          - ColorOS
+          - OneUI
+          - Flyme
+          - OxygenOS
+          - Pixel
+          - Moto
+          - Nubia
+          - Xperia
+          - ZUI
+          - ZenUI
+        default: 'Generic'
+      build_type:
+        description: 'GSI 分区类型'
+        required: true
+        type: choice
+        options:
+          - Aonly
+          - AB
+        default: 'AB'
+
+env:
+  ROM_URL: ${{ github.event.inputs.rom_url }}
+  ROM_NAME: ${{ github.event.inputs.rom_name }}
+  BUILD_TYPE: ${{ github.event.inputs.build_type }}
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-20.04
+    if: github.event.repository.owner.id == github.event.sender.id
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 初始化环境
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git \
+            wget \
+            xz-utils \
+            unzip \
+            brotli \
+            android-sdk-libsparse-utils \
+            e2fsprogs \
+            python3 \
+            python-is-python3 \
+            python3-pip
+
+      - name: 克隆 ErfanGSIs 源码
+        run: |
+          git clone --recurse-submodules https://github.com/erfanoabdi/ErfanGSIs.git ErfanGSIs
+
+      - name: 修复 url2GSI.sh 的 exit 错误
+        run: |
+          cd ErfanGSIs
+          # 移除脚本中的非预期退出，防止构建中断
+          sed -i 's/|| exit 1//g' url2GSI.sh
+          sed -i 's/exit 1//g' url2GSI.sh
+
+      - name: 修复 setup.sh 并安装 ErfanGSIs 依赖
+        run: |
+          cd ErfanGSIs
+          # 将 python-pip 替换为 python3-pip，避免包名不存在
+          sed -i 's/python-pip/python3-pip/g' setup.sh
+          # 注释掉可能导致编译失败的 pip install 行
+          sed -i 's/^[[:space:]]*pip install/#pip install/' setup.sh
+          sed -i 's/^[[:space:]]*pip3 install/#pip3 install/' setup.sh
+          # 提前安装 pycryptodome 替代 pycrypto
+          sudo pip3 install --break-system-packages pycryptodome
+          # 创建输出目录
+          mkdir -p output
+          # 运行官方 setup（仅剩 apt 安装部分，已修复包名）
+          sudo bash ./setup.sh
+
+      - name: 下载 ROM 并生成 GSI
+        run: |
+          cd ErfanGSIs
+          # url2GSI.sh 会直接下载 ROM 并完成制作，无需手动提取
+          sudo bash ./url2GSI.sh -c --$BUILD_TYPE $ROM_URL $ROM_NAME
+
+      - name: 打包 GSI
+        run: |
+          cd ErfanGSIs/output
+          if ls *.img 1>/dev/null 2>&1; then
+            mkdir -p final
+            tar -zcvf final/GSI.tar.gz *.img
+            echo "打包完成"
+          else
+            echo "未生成任何 img 文件！"
+            exit 1
+          fi
+
+      - name: 上传 GSI 到 Release
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: ErfanGSIs/output/final/GSI.tar.gz
+          name: ${{ env.ROM_NAME }}-${{ env.BUILD_TYPE }}-GSI
+          tag: GSI-${{ github.run_id }}
+          token: ${{ secrets.GITHUB_TOKEN }}
