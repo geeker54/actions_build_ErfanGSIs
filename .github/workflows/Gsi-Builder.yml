@@ -1,14 +1,14 @@
-name: Build GSI with ErfanGSIs (url2GSI Fixed)
+name: Build GSI 
 
 on:
   workflow_dispatch:
     inputs:
       rom_url:
-        description: 'ROM 刷机包直链'
+        description: 'ROM 刷机包直链 (.zip)'
         required: true
         type: string
-      rom_name:
-        description: 'ROM 名称'
+      rom_type:
+        description: 'ROM 类型'
         required: true
         type: choice
         options:
@@ -19,14 +19,9 @@ on:
           - Flyme
           - OxygenOS
           - Pixel
-          - Moto
-          - Nubia
-          - Xperia
-          - ZUI
-          - ZenUI
         default: 'Generic'
-      build_type:
-        description: 'GSI 分区类型'
+      output_type:
+        description: '输出分区类型'
         required: true
         type: choice
         options:
@@ -36,9 +31,8 @@ on:
 
 env:
   ROM_URL: ${{ github.event.inputs.rom_url }}
-  ROM_NAME: ${{ github.event.inputs.rom_name }}
-  BUILD_TYPE: ${{ github.event.inputs.build_type }}
-  TZ: Asia/Shanghai
+  ROM_NAME: ${{ github.event.inputs.rom_type }}
+  BUILD_TYPE: ${{ github.event.inputs.output_type }}
 
 jobs:
   build:
@@ -46,75 +40,124 @@ jobs:
     if: github.event.repository.owner.id == github.event.sender.id
 
     steps:
-      - name: 检出仓库
-        uses: actions/checkout@v4
-
       - name: 安装系统依赖
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            git wget xz-utils unzip brotli \
+            wget unzip brotli xz-utils \
             android-sdk-libsparse-utils \
             e2fsprogs \
-            python3 python-is-python3 python3-pip
+            python3 python-is-python3
 
-      - name: 克隆 ErfanGSIs 源码
+      - name: 克隆 ErfanGSIs 并下载工具包
         run: |
-          git clone --recurse-submodules https://github.com/erfanoabdi/ErfanGSIs.git ErfanGSIs
+          git clone --depth=1 https://github.com/erfanoabdi/ErfanGSIs.git ErfanGSIs
+          cd ErfanGSIs
+          # 下载官方工具包（与 setup.sh 相同）
+          wget -q https://github.com/erfanoabdi/ErfanGSIs/releases/download/tools/tools.tar.xz
+          tar -xf tools.tar.xz
+          # 将工具目录加入 PATH
+          echo "$PWD/bin" >> $GITHUB_PATH
 
-      - name: 修复 url2GSI.sh 与安装依赖
+      - name: 修复 make.sh 的兼容性问题
         run: |
           cd ErfanGSIs
+          # 修复 realpath 不识别参数的问题
+          sed -i 's/realpath "\$0"/readlink -f "\$0"/g' make.sh
+          sed -i 's/realpath \$0/readlink -f \$0/g' make.sh
+          # 移除可能导致意外退出的 exit 1/8
+          sed -i 's/|| exit 1//g' make.sh
+          sed -i 's/exit 1//g' make.sh
+          sed -i 's/exit 8//g' make.sh
 
-          # 1. 修复 realpath 不识别 --Aonly / --AB 的问题
-          sed -i 's/realpath "\$0"/readlink -f "\$0"/g' url2GSI.sh
-          sed -i 's/realpath \$0/readlink -f \$0/g' url2GSI.sh
-
-          # 2. 修复 ROM_TYPE 识别错误
-          sed -i 's/^ROM_TYPE=.*/ROM_TYPE=""/' url2GSI.sh
-
-          # 3. 修复意外退出
-          sed -i 's/|| exit 1//g' url2GSI.sh
-          sed -i 's/exit 1//g' url2GSI.sh
-
-          # 4. 修复 setup.sh 的 apt 包名
-          sed -i 's/python-pip/python3-pip/g' setup.sh
-
-          # 5. 注释掉 setup.sh 中会编译失败的 pip 安装
-          sed -i 's/^[[:space:]]*pip install/#pip install/' setup.sh
-          sed -i 's/^[[:space:]]*pip3 install/#pip3 install/' setup.sh
-
-          # 6. 提前安装 pycryptodome（ubuntu-22.04 需要 --break-system-packages）
-          sudo pip3 install --break-system-packages pycryptodome
-
-          # 7. 创建输出目录并运行官方 setup (仅剩下的 apt 部分)
-          mkdir -p output
-          sudo bash ./setup.sh
-
-      - name: 下载 ROM 并生成 GSI
+      - name: 下载 ROM 并提取 system.img
         run: |
           cd ErfanGSIs
-          # 转为小写，防止 --Aonly 出现
-          TYPE_LOWER=$(echo "$BUILD_TYPE" | tr '[:upper:]' '[:lower:]')
-          echo "构建类型: $TYPE_LOWER"
-          sudo bash ./url2GSI.sh -c --${TYPE_LOWER} $ROM_URL $ROM_NAME
+          mkdir -p rom_tmp
+          wget -q -O rom.zip "$ROM_URL"
+          unzip -q rom.zip -d rom_tmp || tar -xf rom.zip -C rom_tmp
 
-      - name: 打包 GSI
+          cd rom_tmp
+          # 查找 system.img
+          if find . -name "system.img" -type f | grep -q .; then
+            cp $(find . -name "system.img" -type f | head -1) ../system.img
+          elif [ -f system.new.dat.br ] && [ -f system.transfer.list ]; then
+            brotli -d system.new.dat.br -o system.new.dat
+            python3 -c "
+import sys; sys.path.insert(0, '../bin')
+from sdat2img import main
+main(['system.transfer.list', 'system.new.dat', '../system.img'])
+" || exit 1
+          else
+            echo "未找到 system 镜像"; exit 1
+          fi
+          cd .. && rm -rf rom_tmp
+
+      - name: 确保 system.img 为 EXT4 格式
+        run: |
+          cd ErfanGSIs
+          IMG_INFO=$(file system.img)
+          echo "原始格式: $IMG_INFO"
+          if echo "$IMG_INFO" | grep -qi "Android sparse image"; then
+            simg2img system.img system_raw.img
+            mv system_raw.img system.img
+          fi
+          IMG_INFO=$(file system.img)
+          if ! echo "$IMG_INFO" | grep -qi "ext4"; then
+            mkdir -p old new
+            sudo mount -t auto -o loop system.img old
+            SIZE=$(sudo du -sb old | awk '{print $1}')
+            NEW_SIZE=$(( SIZE * 12 / 10 / 1048576 + 1 ))M
+            truncate -s $NEW_SIZE system_new.img
+            mkfs.ext4 system_new.img
+            sudo mount -t ext4 -o loop system_new.img new
+            sudo cp -av old/* new/
+            sudo umount old new
+            mv system_new.img system.img
+          fi
+          echo "处理后格式: $(file system.img)"
+
+      - name: 用 make.sh 制作 GSI
+        run:
+          cd ErfanGSIs
+
+          # 映射 ROM 类型到菜单数字（与 make.sh 菜单一致）
+          case "$ROM_NAME" in
+            Generic)   R=1 ;;
+            MIUI)      R=2 ;;
+            ColorOS)   R=3 ;;
+            OneUI)     R=4 ;;
+            Flyme)     R=5 ;;
+            OxygenOS)  R=6 ;;
+            Pixel)     R=7 ;;
+            *)         R=1 ;;
+          esac
+
+          # GSI 类型：1=Aonly, 3=AB
+          if [ "$BUILD_TYPE" = "Aonly" ]; then
+            G=1
+          else
+            G=3
+          fi
+
+          echo "GSI类型=$G, ROM类型=$R"
+          # 用管道输入两个数字，完成交互
+          printf "%d\n%d\n" "$G" "$R" | sudo bash make.sh
+
+      - name: 打包并上传
         run: |
           cd ErfanGSIs/output
           if ls *.img 1>/dev/null 2>&1; then
-            mkdir -p final
-            tar -zcvf final/GSI.tar.gz *.img
-            echo "打包完成"
+            tar -zcvf ../GSI.tar.gz *.img
+            echo "GSI.tar.gz 已生成"
           else
-            echo "未生成任何 img 文件！"
-            exit 1
+            echo "未找到 img 文件"; exit 1
           fi
 
-      - name: 上传 GSI 到 Release
+      - name: 上传到 Release
         uses: ncipollo/release-action@v1
         with:
-          artifacts: ErfanGSIs/output/final/GSI.tar.gz
-          name: ${{ env.ROM_NAME }}-${{ env.BUILD_TYPE }}-GSI
+          artifacts: ErfanGSIs/GSI.tar.gz
+          name: ${{ env.ROM_NAME }}-${{ env.BUILD_TYPE }}
           tag: GSI-${{ github.run_id }}
           token: ${{ secrets.GITHUB_TOKEN }}
