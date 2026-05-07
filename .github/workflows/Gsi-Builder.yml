@@ -1,14 +1,14 @@
-name: Build GSI with ErfanGSIs
+name: Build GSI with ErfanGSIs (url2GSI Fixed)
 
 on:
   workflow_dispatch:
     inputs:
       rom_url:
-        description: 'ROM 刷机包直链 (.zip)'
+        description: 'ROM 刷机包直链'
         required: true
         type: string
       rom_name:
-        description: 'ROM 名称 (ErfanGSIs 支持的类型)'
+        description: 'ROM 名称'
         required: true
         type: choice
         options:
@@ -53,45 +53,51 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            git \
-            wget \
-            xz-utils \
-            unzip \
-            brotli \
+            git wget xz-utils unzip brotli \
             android-sdk-libsparse-utils \
             e2fsprogs \
-            python3 \
-            python-is-python3 \
-            python3-pip
+            python3 python-is-python3 python3-pip
 
       - name: 克隆 ErfanGSIs 源码
         run: |
           git clone --recurse-submodules https://github.com/erfanoabdi/ErfanGSIs.git ErfanGSIs
 
-      - name: 修复 url2GSI.sh 的 exit 错误
+      - name: 修复 url2GSI.sh 与安装依赖
         run: |
           cd ErfanGSIs
+
+          # 1. 修复 realpath 不识别 --Aonly / --AB 的问题
+          sed -i 's/realpath "\$0"/readlink -f "\$0"/g' url2GSI.sh
+          sed -i 's/realpath \$0/readlink -f \$0/g' url2GSI.sh
+
+          # 2. 修复 ROM_TYPE 识别错误
+          sed -i 's/^ROM_TYPE=.*/ROM_TYPE=""/' url2GSI.sh
+
+          # 3. 修复意外退出
           sed -i 's/|| exit 1//g' url2GSI.sh
           sed -i 's/exit 1//g' url2GSI.sh
 
-      - name: 修复 setup.sh 并安装依赖
-        run: |
-          cd ErfanGSIs
-          # 替换过时的包名
+          # 4. 修复 setup.sh 的 apt 包名
           sed -i 's/python-pip/python3-pip/g' setup.sh
-          # 注释掉可能编译失败的 pip 安装
+
+          # 5. 注释掉 setup.sh 中会编译失败的 pip 安装
           sed -i 's/^[[:space:]]*pip install/#pip install/' setup.sh
           sed -i 's/^[[:space:]]*pip3 install/#pip3 install/' setup.sh
-          # 安装 pycryptodome 替代 pycrypto
-          sudo pip3 install pycryptodome
+
+          # 6. 提前安装 pycryptodome（ubuntu-22.04 需要 --break-system-packages）
+          sudo pip3 install --break-system-packages pycryptodome
+
+          # 7. 创建输出目录并运行官方 setup (仅剩下的 apt 部分)
           mkdir -p output
-          # 执行官方环境准备（剩余 apt 部分）
           sudo bash ./setup.sh
 
       - name: 下载 ROM 并生成 GSI
         run: |
           cd ErfanGSIs
-          sudo bash ./url2GSI.sh -c --$BUILD_TYPE $ROM_URL $ROM_NAME
+          # 转为小写，防止 --Aonly 出现
+          TYPE_LOWER=$(echo "$BUILD_TYPE" | tr '[:upper:]' '[:lower:]')
+          echo "构建类型: $TYPE_LOWER"
+          sudo bash ./url2GSI.sh -c --${TYPE_LOWER} $ROM_URL $ROM_NAME
 
       - name: 打包 GSI
         run: |
