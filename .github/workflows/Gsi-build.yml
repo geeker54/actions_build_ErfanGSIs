@@ -1,0 +1,161 @@
+name: Build GSI (Stable make.sh)
+
+on:
+  workflow_dispatch:
+    inputs:
+      rom_url:
+        description: 'ROM 刷机包直链'
+        required: true
+        type: string
+      rom_type:
+        description: 'ROM 类型'
+        required: true
+        type: choice
+        options:
+          - Generic
+          - MIUI
+          - ColorOS
+          - OneUI
+          - Flyme
+          - OxygenOS
+          - Pixel
+        default: 'Generic'
+      output_type:
+        description: '输出分区类型'
+        required: true
+        type: choice
+        options:
+          - Aonly
+          - AB
+        default: 'AB'
+
+env:
+  ROM_URL: ${{ github.event.inputs.rom_url }}
+  ROM_NAME: ${{ github.event.inputs.rom_type }}
+  BUILD_TYPE: ${{ github.event.inputs.output_type }}
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    if: github.event.repository.owner.id == github.event.sender.id
+    steps:
+      - name: 安装系统工具
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            wget unzip brotli xz-utils file \
+            android-sdk-libsparse-utils \
+            e2fsprogs \
+            python3 python-is-python3
+
+      - name: 克隆 ErfanGSIs 并获取必要工具
+        run: |
+          git clone --depth=1 https://github.com/erfanoabdi/ErfanGSIs.git ErfanGSIs
+          cd ErfanGSIs
+          # 下载官方 tools 包（避开 setup.sh 的所有 pip 问题）
+          wget -q https://github.com/erfanoabdi/ErfanGSIs/releases/download/tools/tools.tar.xz
+          tar -xf tools.tar.xz
+          chmod +x bin/*
+          echo "$PWD/bin" >> $GITHUB_PATH
+          # 下载 sdat2img.py（提取 system.new.dat.br 用）
+          wget -q -O tools/sdat2img.py https://raw.githubusercontent.com/xpirt/sdat2img/master/sdat2img.py
+          chmod +x tools/sdat2img.py
+
+      - name: 修复 make.sh 兼容性
+        run: |
+          cd ErfanGSIs
+          sed -i 's/realpath "\$0"/readlink -f "\$0"/g' make.sh
+          sed -i 's/realpath \$0/readlink -f \$0/g' make.sh
+          sed -i 's/|| exit 1//g' make.sh
+          sed -i '/^exit 1/d' make.sh
+          sed -i '/^exit 8/d' make.sh
+
+      - name: 下载 ROM 并提取 system.img
+        run: |
+          cd ErfanGSIs
+          mkdir -p rom_tmp
+          wget -q -O rom.zip "$ROM_URL"
+          echo "ROM 下载完成，开始解压..."
+          if unzip -q rom.zip -d rom_tmp; then
+            echo "解压成功 (ZIP)"
+          elif tar -xf rom.zip -C rom_tmp; then
+            echo "解压成功 (TAR)"
+          else
+            echo "解压失败"; exit 1
+          fi
+
+          cd rom_tmp
+          if find . -name "system.img" -type f | grep -q .; then
+            cp $(find . -name "system.img" -type f | head -1) ../system.img
+            echo "找到 system.img"
+          elif [ -f system.new.dat.br ] && [ -f system.transfer.list ]; then
+            echo "转换 system.new.dat.br..."
+            brotli -d system.new.dat.br -o system.new.dat
+            python3 ../tools/sdat2img.py system.transfer.list system.new.dat ../system.img
+          else
+            echo "未找到可用 system 镜像"; exit 1
+          fi
+          cd ..
+          rm -rf rom_tmp
+          ls -lh system.img
+
+      - name: 确保 system.img 为 EXT4
+        run: |
+          cd ErfanGSIs
+          INFO=$(file system.img)
+          echo "镜像格式: $INFO"
+          if echo "$INFO" | grep -qi "Android sparse image"; then
+            echo "转换 sparse → raw..."
+            simg2img system.img raw.img
+            mv raw.img system.img
+          fi
+          INFO=$(file system.img)
+          if ! echo "$INFO" | grep -qi "ext4"; then
+            echo "重建为 ext4..."
+            mkdir -p old new
+            sudo mount -t auto -o loop system.img old
+            SIZE=$(sudo du -sb old | awk '{print $1}')
+            NEW_SIZE=$(( SIZE * 12 / 10 / 1048576 + 1 ))M
+            truncate -s $NEW_SIZE new.img
+            mkfs.ext4 new.img
+            sudo mount -t ext4 -o loop new.img new
+            sudo cp -av old/* new/
+            sudo umount old new
+            mv new.img system.img
+          fi
+          echo "最终格式: $(file system.img)"
+
+      - name: 用 make.sh 制作 GSI
+        run: |
+          cd ErfanGSIs
+          case "$ROM_NAME" in
+            Generic)   R=1 ;;
+            MIUI)      R=2 ;;
+            ColorOS)   R=3 ;;
+            OneUI)     R=4 ;;
+            Flyme)     R=5 ;;
+            OxygenOS)  R=6 ;;
+            Pixel)     R=7 ;;
+            *)         R=1 ;;
+          esac
+          if [ "$BUILD_TYPE" = "Aonly" ]; then G=1; else G=3; fi
+          echo "参数: GSI=$G , ROM=$R"
+          printf "%d\n%d\n" "$G" "$R" | sudo bash make.sh
+
+      - name: 打包产物
+        run: |
+          cd ErfanGSIs
+          if ls output/*.img 1>/dev/null 2>&1; then
+            tar -zcvf GSI.tar.gz output/*.img
+            echo "打包完成: GSI.tar.gz"
+          else
+            echo "未生成 img 文件，请检查上方日志"; exit 1
+          fi
+
+      - name: 上传到 Release
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: ErfanGSIs/GSI.tar.gz
+          name: ${{ env.ROM_NAME }}-${{ env.BUILD_TYPE }}
+          tag: GSI-${{ github.run_id }}
+          token: ${{ secrets.GITHUB_TOKEN }}
