@@ -1,4 +1,4 @@
-name: Build GSI (Stable make.sh)
+name: Build GSI (Stable)
 
 on:
   workflow_dispatch:
@@ -37,9 +37,8 @@ env:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    if: github.event.repository.owner.id == github.event.sender.id
     steps:
-      - name: 安装系统工具
+      - name: 安装系统依赖
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -48,24 +47,26 @@ jobs:
             e2fsprogs \
             python3 python-is-python3
 
-      - name: 克隆 ErfanGSIs 并获取必要工具
+      - name: 克隆 ErfanGSIs 并准备工具
         run: |
           git clone --depth=1 https://github.com/erfanoabdi/ErfanGSIs.git ErfanGSIs
           cd ErfanGSIs
-          # 下载官方 tools 包（避开 setup.sh 的所有 pip 问题）
+          # 下载官方二进制工具包（绕过 setup.sh）
           wget -q https://github.com/erfanoabdi/ErfanGSIs/releases/download/tools/tools.tar.xz
           tar -xf tools.tar.xz
           chmod +x bin/*
           echo "$PWD/bin" >> $GITHUB_PATH
-          # 下载 sdat2img.py（提取 system.new.dat.br 用）
+          # 下载 sdat2img.py（用于 system.new.dat.br 转换）
           wget -q -O tools/sdat2img.py https://raw.githubusercontent.com/xpirt/sdat2img/master/sdat2img.py
           chmod +x tools/sdat2img.py
 
       - name: 修复 make.sh 兼容性
         run: |
           cd ErfanGSIs
+          # 替换 realpath 为 readlink，避免参数误解
           sed -i 's/realpath "\$0"/readlink -f "\$0"/g' make.sh
           sed -i 's/realpath \$0/readlink -f \$0/g' make.sh
+          # 移除意外退出语句
           sed -i 's/|| exit 1//g' make.sh
           sed -i '/^exit 1/d' make.sh
           sed -i '/^exit 8/d' make.sh
@@ -75,7 +76,7 @@ jobs:
           cd ErfanGSIs
           mkdir -p rom_tmp
           wget -q -O rom.zip "$ROM_URL"
-          echo "ROM 下载完成，开始解压..."
+          echo "ROM 下载完成，解压中..."
           if unzip -q rom.zip -d rom_tmp; then
             echo "解压成功 (ZIP)"
           elif tar -xf rom.zip -C rom_tmp; then
@@ -99,7 +100,7 @@ jobs:
           rm -rf rom_tmp
           ls -lh system.img
 
-      - name: 确保 system.img 为 EXT4
+      - name: 确保 system.img 为 EXT4 格式
         run: |
           cd ErfanGSIs
           INFO=$(file system.img)
@@ -125,22 +126,12 @@ jobs:
           fi
           echo "最终格式: $(file system.img)"
 
-      - name: 用 make.sh 制作 GSI
+      - name: 用 make.sh 制作 GSI (命令行参数模式)
         run: |
           cd ErfanGSIs
-          case "$ROM_NAME" in
-            Generic)   R=1 ;;
-            MIUI)      R=2 ;;
-            ColorOS)   R=3 ;;
-            OneUI)     R=4 ;;
-            Flyme)     R=5 ;;
-            OxygenOS)  R=6 ;;
-            Pixel)     R=7 ;;
-            *)         R=1 ;;
-          esac
-          if [ "$BUILD_TYPE" = "Aonly" ]; then G=1; else G=3; fi
-          echo "参数: GSI=$G , ROM=$R"
-          printf "%d\n%d\n" "$G" "$R" | sudo bash make.sh
+          echo "构建参数: ROM=$ROM_NAME, GSI类型=$BUILD_TYPE"
+          # 直接传参：镜像路径 ROM类型 Aonly/AB
+          sudo bash make.sh system.img "$ROM_NAME" "$BUILD_TYPE"
 
       - name: 打包产物
         run: |
